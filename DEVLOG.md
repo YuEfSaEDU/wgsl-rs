@@ -730,3 +730,44 @@ common CPU-side matrix ops (`Mat4f * Vec4f`, `Mat4f * Mat4f`). This is
 acceptable because the CPU path in wgsl-rs exists primarily to validate
 the GPU path in roundtrip tests, not as a hot execution path. Revisit if
 CPU matrix math shows up in a profile for a downstream crate.
+
+### 2026-09-15: Module ids derived from crate identity (issue #165)
+
+**Problem:** Every `#[wgsl]` module gets a `u64` id baked into its
+`WGSL_SOURCE` static, and the runtime assembler deduplicates imported
+sources by that id. Ids came from a per-process `AtomicU64` counter in
+the proc-macro. The proc-macro's statics are per rustc invocation, so
+the counter restarts at 0 for every crate — and every target — being
+compiled. Two modules in different crates routinely shared an id, the
+assembler dropped one as a "duplicate" import, and the surviving
+module's calls into the dropped one failed with unknown-identifier
+parse errors.
+
+**Decision:** Derive the id by FNV-1a-64 hashing the consuming
+compilation unit's identity — `CARGO_PKG_NAME`, `CARGO_PKG_VERSION`,
+`CARGO_CRATE_NAME`, and `CARGO_BIN_NAME` (for binary targets), each
+NUL-separated — and XOR-ing in the per-process counter (see
+`wgsl-rs-macros/src/module_id.rs`).
+
+**Justification:**
+- Within one compilation unit only the counter varies, and XOR with a
+  fixed hash is a bijection in the counter, so ids are *exactly*
+  unique — the old guarantee, precisely.
+- Across units the identity hash separates ids. Including the crate/bin
+  target names (added after PR #173 review) also separates a package's
+  lib target from its integration-test and bin targets, which share
+  the package identity but each restart the counter; including the
+  version separates two semver-incompatible copies of one package,
+  which cargo can legally compile into one binary.
+- Cross-unit separation is probabilistic, like any 64-bit hash: it
+  fails only if two distinct identities hash to values differing by a
+  small counter XOR (~2^-64 per pair; the birthday bound bites around
+  2^32 modules). Accepted — exact ids would require widening the
+  public `u64` id to a string or (crate, path) key. Residual edge:
+  two targets of one package with aliasing `CARGO_CRATE_NAME` values
+  (e.g. an integration test named exactly after the lib crate).
+- FNV-1a is ~10 lines and *stable*: ids are baked into each crate at
+  its own compile time, so the hash must not vary between rustc
+  versions — which rules out `DefaultHasher`.
+- Outside cargo the env vars are absent, and ids degrade to the old
+  counter-only scheme, so non-cargo builds behave exactly as before.
