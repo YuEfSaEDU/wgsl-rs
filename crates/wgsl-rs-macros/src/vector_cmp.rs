@@ -24,11 +24,19 @@
 //! generic template is not wrapped. Monomorphized functions — the common
 //! case — are covered, because `monomorphize` appends their concrete
 //! copies to the module content before this pass runs.
+//!
+//! The traversal reuses the [`crate::parse_visitor`] walker (the same
+//! machinery monomorphization uses): the pass is a
+//! [`parse_visitor::ParseVisitorMut`] that overrides the statement and
+//! expression hooks to track locals and wrap comparisons. Operand types
+//! are computed by re-reading the (already transformed) operands at each
+//! comparison node — a second shallow walk, compile-time only.
 
 use crate::parse::{
-    self, BinOp, Block, CaseSelector, ElseBody, Expr, FnPath, ImplItem, Item, Lit, ReturnType,
-    ScalarType, Stmt, Type, UnOp,
+    self, BinOp, Block, Expr, FnPath, Item, ItemConst, ItemFn, Lit, ReturnType, ScalarType, Stmt,
+    Type, UnOp,
 };
+use crate::parse_visitor::{self, ParseVisitorMut};
 use proc_macro2::{Ident, Span};
 use std::collections::HashMap;
 use syn::punctuated::Punctuated;
@@ -329,61 +337,65 @@ impl Symbols {
             _ => None,
         }
     }
+} // impl Symbols
 
-    /// Transform `e` in place (wrapping any vector `==`/`!=` found inside)
-    /// and return the inferred type of the result, if known.
-    fn tx(&self, e: &mut Expr, locals: &mut Locals) -> Option<Type> {
-        if !matches!(e, Expr::Binary { .. }) {
-            self.tx_children(e, locals);
-            return self.infer(e, locals);
+/// The #164 rewrite pass. A [`ParseVisitorMut`] walker that carries the
+/// module symbol table and the current function's local-variable types.
+struct VectorCmpPass<'a> {
+    symbols: &'a Symbols,
+    locals: Locals,
+}
+
+impl<'a> VectorCmpPass<'a> {
+    fn new(symbols: &'a Symbols) -> Self {
+        Self {
+            symbols,
+            locals: Locals::new(),
         }
+    }
 
-        // Take the whole Binary node out of `e` so the children can be
-        // transformed and the node reassembled without borrow conflicts.
-        let span = e.span();
-        let inner = std::mem::replace(e, Expr::Ident(Ident::new(TMP_IDENT, span)));
-        let (mut lhs, op, mut rhs) = match inner {
-            Expr::Binary { lhs, op, rhs } => (lhs, op, rhs),
-            other => {
-                *e = other;
-                return None; // Unreachable: guarded above.
+    /// Wrap a vector `==`/`!=` node in `all(...)` / `!(all(...))` when
+    /// both operands infer vector-typed. Types are re-read from the
+    /// (already transformed) operands.
+    fn wrap_vector_cmp(&self, e: &mut Expr) {
+        if !matches!(
+            e,
+            Expr::Binary {
+                op: BinOp::Eq(_) | BinOp::Ne(_),
+                ..
             }
-        };
-        let lt = self.tx(&mut lhs, locals);
-        let rt = self.tx(&mut rhs, locals);
-
-        /// Both comparisons are lowered the same way when both operands are
-        /// vector-typed; scalar/unknown comparisons are left raw.
-        #[derive(PartialEq)]
-        enum OpKind {
-            Eq,
-            Ne,
-            Shift,
-            Arith,
+        ) {
+            return;
         }
-        let kind = match &op {
-            BinOp::Eq(_) => OpKind::Eq,
-            BinOp::Ne(_) => OpKind::Ne,
-            BinOp::Shl(_) | BinOp::Shr(_) => OpKind::Shift,
-            _ => OpKind::Arith,
+        let (lt, rt) = match e {
+            Expr::Binary { lhs, rhs, .. } => (
+                self.symbols.infer(lhs, &self.locals),
+                self.symbols.infer(rhs, &self.locals),
+            ),
+            _ => unreachable!("guarded by the matches! above"),
         };
-
-        let both_vec = matches!(
+        if !matches!(
             (&lt, &rt),
             (Some(Type::Vector { .. }), Some(Type::Vector { .. }))
-        );
+        ) {
+            return;
+        }
 
-        if (kind == OpKind::Eq || kind == OpKind::Ne) && both_vec {
-            // `a == b` -> `all(a == b)`; `a != b` -> `!(all(a == b))`,
-            // matching `PartialEq::ne == !(self == other)`. Note the inner
-            // operator is always `==`: `all(a != b)` means "every component
-            // differs", which is NOT `PartialEq::ne`.
-            let mut params = Punctuated::new();
-            let inner_op = match kind {
-                OpKind::Eq => op,
-                OpKind::Ne => BinOp::Eq(Default::default()),
-                _ => unreachable!("guarded by both_vec + kind check"),
+        // Take the node out of `e` so it can be rebuilt without borrow
+        // conflicts.
+        let span = e.span();
+        let inner = std::mem::replace(e, Expr::Ident(Ident::new(TMP_IDENT, span)));
+        if let Expr::Binary { lhs, op, rhs } = inner {
+            // The inner operator is always `==`: `all(a != b)` means
+            // "every component differs", which is not `PartialEq::ne`
+            // (`!(self == other)`).
+            let was_eq = matches!(op, BinOp::Eq(_));
+            let inner_op = if was_eq {
+                op
+            } else {
+                BinOp::Eq(Default::default())
             };
+            let mut params = Punctuated::new();
             params.push(Expr::Binary {
                 lhs,
                 op: inner_op,
@@ -396,7 +408,7 @@ impl Symbols {
                 paren_token: Default::default(),
                 params,
             };
-            *e = if kind == OpKind::Eq {
+            *e = if was_eq {
                 all
             } else {
                 Expr::Unary {
@@ -404,186 +416,95 @@ impl Symbols {
                     expr: Box::new(all),
                 }
             };
-            return Some(scalar_ty(ScalarType::Bool, span));
         }
-
-        let combined = match kind {
-            OpKind::Shift => lt,
-            OpKind::Arith => combine_arith(lt, rt),
-            // Comparisons and logical ops are bool in Rust.
-            _ => Some(scalar_ty(ScalarType::Bool, span)),
-        };
-        *e = Expr::Binary { lhs, op, rhs };
-        combined
     }
+}
 
-    /// Recurse into an expression's children without inferring this node.
-    fn tx_children(&self, e: &mut Expr, locals: &mut Locals) {
-        match e {
-            Expr::Paren { inner, .. } => {
-                self.tx(inner, locals);
+impl ParseVisitorMut for VectorCmpPass<'_> {
+    fn visit_item(&mut self, item: &mut Item) -> Result<(), parse::Error> {
+        match item {
+            // Nested modules build their own symbol table: names inside
+            // do not resolve against the enclosing module's items.
+            Item::Mod(m) => {
+                rewrite(&mut m.content);
+                Ok(())
             }
-            Expr::Reference { expr, .. } => {
-                self.tx(expr, locals);
-            }
-            Expr::Unary { expr, .. } => {
-                self.tx(expr, locals);
-            }
-            Expr::FnCall { params, .. } => {
-                for p in params.iter_mut() {
-                    self.tx(p, locals);
-                }
-            }
-            Expr::Array { elems, .. } => {
-                for el in elems.iter_mut() {
-                    self.tx(el, locals);
-                }
-            }
-            Expr::ArrayIndexing { lhs, index, .. } => {
-                self.tx(lhs, locals);
-                self.tx(index, locals);
-            }
-            Expr::Swizzle { lhs, params, .. } => {
-                self.tx(lhs, locals);
-                if let Some(args) = params {
-                    for p in args.iter_mut() {
-                        self.tx(p, locals);
-                    }
-                }
-            }
-            Expr::Cast { lhs, .. } => {
-                self.tx(lhs, locals);
-            }
-            Expr::Struct { fields, .. } => {
-                for field in fields.iter_mut() {
-                    self.tx(&mut field.expr, locals);
-                }
-            }
-            Expr::FieldAccess { base, .. } => {
-                self.tx(base, locals);
-            }
-            Expr::ZeroValueArray { len, .. } => {
-                self.tx(len, locals);
-            }
-            _ => {}
+            _ => parse_visitor::walk_item(self, item),
         }
     }
 
-    /// Transform a block's statements in a fresh scope.
-    fn tx_block(&self, b: &mut Block, locals: &mut Locals) {
-        locals.push();
-        for stmt in b.stmt.iter_mut() {
-            self.tx_stmt(stmt, locals);
+    /// A fresh locals scope per function, seeded with the parameters.
+    fn visit_fn(&mut self, f: &mut ItemFn) -> Result<(), parse::Error> {
+        self.locals = Locals::new();
+        for arg in f.inputs.iter() {
+            self.locals.insert(&arg.ident.to_string(), arg.ty.clone());
         }
-        locals.pop();
+        parse_visitor::walk_fn(self, f)
     }
 
-    fn tx_if(&self, i: &mut parse::StmtIf, locals: &mut Locals) {
-        self.tx(&mut i.condition, locals);
-        self.tx_block(&mut i.then_block, locals);
-        if let Some(else_branch) = &mut i.else_branch {
-            match &mut else_branch.body {
-                ElseBody::Block(block) => self.tx_block(block, locals),
-                ElseBody::If(nested) => self.tx_if(nested, locals),
-            }
-        }
+    /// Module- and impl-level const initializers have no function locals
+    /// in scope; reset for the walk and restore after.
+    fn visit_const(&mut self, c: &mut ItemConst) -> Result<(), parse::Error> {
+        let saved = std::mem::replace(&mut self.locals, Locals::new());
+        self.locals = Locals::new();
+        let result = parse_visitor::walk_const(self, c);
+        self.locals = saved;
+        result
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn tx_stmt(&self, s: &mut Stmt, locals: &mut Locals) {
+    fn visit_block(&mut self, b: &mut Block) -> Result<(), parse::Error> {
+        self.locals.push();
+        let result = parse_visitor::walk_block(self, b);
+        self.locals.pop();
+        result
+    }
+
+    fn visit_stmt(&mut self, s: &mut Stmt) -> Result<(), parse::Error> {
         match s {
             Stmt::Local(l) => {
                 // Transform the initializer first so a `let` bound to a
                 // vector comparison records the *wrapped* (bool) type.
-                let inferred = l
-                    .init
-                    .as_mut()
-                    .and_then(|init| self.tx(&mut init.expr, locals));
+                if let Some(init) = &mut l.init {
+                    self.visit_expr(&mut init.expr)?;
+                }
                 let bound = match &l.ty {
                     Some((_, ty)) => Some(ty.clone()),
-                    None => inferred,
+                    None => l
+                        .init
+                        .as_ref()
+                        .and_then(|i| self.symbols.infer(&i.expr, &self.locals)),
                 };
                 if let Some(ty) = bound {
-                    locals.insert(&l.ident.to_string(), ty);
+                    self.locals.insert(&l.ident.to_string(), ty);
                 }
+                Ok(())
             }
             Stmt::Const(c) => {
-                self.tx(&mut c.expr, locals);
-                locals.insert(&c.ident.to_string(), c.ty.clone());
-            }
-            Stmt::Assignment { lhs, rhs, .. } => {
-                self.tx(lhs, locals);
-                self.tx(rhs, locals);
-            }
-            Stmt::CompoundAssignment { lhs, rhs, .. } => {
-                self.tx(lhs, locals);
-                self.tx(rhs, locals);
-            }
-            Stmt::While {
-                condition, body, ..
-            } => {
-                self.tx(condition, locals);
-                self.tx_block(body, locals);
-            }
-            Stmt::Loop { body, .. } => self.tx_block(body, locals),
-            Stmt::Expr { expr, .. } => {
-                self.tx(expr, locals);
-            }
-            Stmt::If(i) => self.tx_if(i, locals),
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Discard { .. } => {}
-            Stmt::Return { expr, .. } => {
-                if let Some(e) = expr {
-                    self.tx(e, locals);
-                }
+                self.visit_expr(&mut c.expr)?;
+                self.locals.insert(&c.ident.to_string(), c.ty.clone());
+                Ok(())
             }
             Stmt::For(f) => {
-                self.tx(&mut f.from, locals);
-                self.tx(&mut f.to, locals);
-                let var_ty = self.infer(&f.from, locals);
-                locals.push();
+                self.visit_expr(&mut f.from)?;
+                self.visit_expr(&mut f.to)?;
+                let var_ty = self.symbols.infer(&f.from, &self.locals);
+                self.locals.push();
                 if let Some(ty) = var_ty {
-                    locals.insert(&f.ident.to_string(), ty);
+                    self.locals.insert(&f.ident.to_string(), ty);
                 }
-                self.tx_block(&mut f.body, locals);
-                locals.pop();
+                let result = self.visit_block(&mut f.body);
+                self.locals.pop();
+                result
             }
-            Stmt::Switch(sw) => {
-                self.tx(&mut sw.selector, locals);
-                for arm in sw.arms.iter_mut() {
-                    for selector in arm.selectors.iter_mut() {
-                        if let CaseSelector::Expr(e) = selector {
-                            self.tx(e, locals);
-                        }
-                    }
-                    self.tx_block(&mut arm.body, locals);
-                }
-            }
-            Stmt::Block(b) => self.tx_block(b, locals),
-            Stmt::SlabCopy {
-                src,
-                src_offset,
-                dest,
-                dest_offset,
-                size,
-                ..
-            } => {
-                self.tx(src, locals);
-                self.tx(src_offset, locals);
-                self.tx(dest, locals);
-                self.tx(dest_offset, locals);
-                self.tx(size, locals);
-            }
-            Stmt::Macro { .. } => {}
+            _ => parse_visitor::walk_stmt(self, s),
         }
     }
 
-    /// Seed a locals scope from a function's parameters and walk its body.
-    fn tx_fn(&self, f: &mut parse::ItemFn) {
-        let mut locals = Locals::new();
-        for arg in f.inputs.iter() {
-            locals.insert(&arg.ident.to_string(), arg.ty.clone());
-        }
-        self.tx_block(&mut f.block, &mut locals);
+    fn visit_expr(&mut self, e: &mut Expr) -> Result<(), parse::Error> {
+        // Descend first (bottom-up), then decide on this node.
+        parse_visitor::walk_expr(self, e)?;
+        self.wrap_vector_cmp(e);
+        Ok(())
     }
 }
 
@@ -591,34 +512,10 @@ impl Symbols {
 /// module (including monomorphized instances and impl methods).
 pub(crate) fn rewrite(content: &mut [Item]) {
     let symbols = Symbols::build(content);
-    rewrite_with(content, &symbols);
-}
-
-fn rewrite_with(content: &mut [Item], symbols: &Symbols) {
+    let mut pass = VectorCmpPass::new(&symbols);
     for item in content.iter_mut() {
-        match item {
-            Item::Fn(f) => symbols.tx_fn(f),
-            Item::Impl(i) => {
-                for impl_item in i.items.iter_mut() {
-                    match impl_item {
-                        ImplItem::Fn(f) => symbols.tx_fn(f),
-                        ImplItem::Const(c) => {
-                            let mut locals = Locals::new();
-                            symbols.tx(&mut c.expr, &mut locals);
-                        }
-                        ImplItem::Type(_) => {}
-                    }
-                }
-            }
-            Item::Const(c) => {
-                let mut locals = Locals::new();
-                symbols.tx(&mut c.expr, &mut locals);
-            }
-            // Nested modules build their own symbol table: names inside do
-            // not resolve against the enclosing module's items.
-            Item::Mod(m) => rewrite(&mut m.content),
-            _ => {}
-        }
+        // The pass is infallible: every hook returns `Ok(())`.
+        let _ = pass.visit_item(item);
     }
 }
 
