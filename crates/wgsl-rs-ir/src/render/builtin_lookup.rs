@@ -7,12 +7,15 @@
 //!
 //! This table is duplicated from `wgsl-rs-macros/src/builtins.rs` so that
 //! `wgsl-rs-ir` can stay completely standalone (no dependency on the
-//! proc-macro crate). The two should be kept in sync; tests should pin
-//! both copies.
+//! proc-macro crate — it cannot depend on one). The two are pinned in
+//! sync by tests in `wgsl-rs-macros/src/builtins.rs`, which links this
+//! crate as a normal dependency and compares the copies.
 
 use crate::BinOp;
 
-const TABLE: &[(&str, &str)] = &[
+/// The translation table. Public so the duplicated copy in
+/// `wgsl-rs-macros` can be compared against it by sync tests.
+pub const TABLE: &[(&str, &str)] = &[
     // Boolean vector aliases
     ("vec2b", "vec2<bool>"),
     ("vec3b", "vec3<bool>"),
