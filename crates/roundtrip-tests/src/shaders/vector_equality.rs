@@ -159,17 +159,25 @@ pub mod cmp_ne_mask {
     }
 }
 
-/// Deterministic input: 64 pairs of vec4s. Every 4th pair is identical (so
-/// the equality paths take their true branch); the other pairs differ in
-/// every component.
+/// Deterministic input: 64 pairs of vec4s, varying how many components
+/// differ. With only identical / fully-different pairs, `all(a == b)`,
+/// `any(cmp_eq(a, b))` and the `!=` reductions agree on every input and
+/// an all-vs-any semantic swap would go undetected — so pairs also
+/// differ in exactly one and two components:
+///
+/// * `i % 4 == 0`: identical (4 shared)
+/// * `i % 4 == 1`: differ in x only (3 shared)
+/// * `i % 4 == 2`: differ in x, y (2 shared)
+/// * `i % 4 == 3`: differ in every component (0 shared)
 fn vector_equality_inputs() -> [f32; 512] {
     let mut v = [0.0f32; 512];
     for i in 0..N {
         let a = [i as f32, i as f32 + 1.0, i as f32 + 2.0, i as f32 + 3.0];
-        let b = if i % 4 == 0 {
-            a
-        } else {
-            [a[0] + 1.0, a[1] + 2.0, a[2] + 3.0, a[3] + 4.0]
+        let b = match i % 4 {
+            0 => a,
+            1 => [a[0] + 1.0, a[1], a[2], a[3]],
+            2 => [a[0] + 1.0, a[1] + 2.0, a[2], a[3]],
+            _ => [a[0] + 1.0, a[1] + 2.0, a[2] + 3.0, a[3] + 4.0],
         };
         let base = i * 8;
         v[base..base + 4].copy_from_slice(&a);

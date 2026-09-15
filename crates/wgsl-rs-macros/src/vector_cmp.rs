@@ -33,8 +33,8 @@
 //! comparison node — a second shallow walk, compile-time only.
 
 use crate::parse::{
-    self, BinOp, Block, Expr, FnPath, Item, ItemConst, ItemFn, Lit, ReturnType, ScalarType, Stmt,
-    Type, UnOp,
+    self, BinOp, Block, Expr, FnPath, ImplItem, Item, ItemConst, ItemFn, Lit, ReturnType,
+    ScalarType, Stmt, Type, UnOp,
 };
 use crate::parse_visitor::{self, ParseVisitorMut};
 use proc_macro2::{Ident, Span};
@@ -57,6 +57,9 @@ struct Symbols {
     structs: HashMap<String, Vec<(String, Type)>>,
     /// Module-level consts by name.
     consts: HashMap<String, Type>,
+    /// Impl methods by rendered mangled name (`Type_method`) -> return
+    /// type (`None` for `->`-less methods).
+    methods: HashMap<String, Option<Type>>,
 }
 
 /// Scoped local-variable types, innermost scope last.
@@ -133,6 +136,54 @@ fn vector_ctor_alias(name: &str) -> Option<(u8, ScalarType)> {
     Some((elements, scalar))
 }
 
+/// WGSL builtin functions that preserve the shape of their first
+/// argument: scalar -> scalar, `vecN<T>` -> `vecN<T>`. Used for inference
+/// only — never rendered.
+const VECTOR_PRESERVING_BUILTINS: &[&str] = &[
+    "abs",
+    "acos",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "clamp",
+    "cos",
+    "cosh",
+    "cross",
+    "degrees",
+    "dpdx",
+    "dpdy",
+    "exp",
+    "exp2",
+    "face_forward",
+    "floor",
+    "fma",
+    "fract",
+    "fwidth",
+    "inverse_sqrt",
+    "log",
+    "log2",
+    "max",
+    "min",
+    "mix",
+    "normalize",
+    "pow",
+    "radians",
+    "reflect",
+    "refract",
+    "round",
+    "saturate",
+    "select",
+    "sign",
+    "sin",
+    "sinh",
+    "smoothstep",
+    "sqrt",
+    "tan",
+    "tanh",
+    "trunc",
+];
+
 /// Combine inferred operand types of an arithmetic/bitwise binary
 /// operation: a vector operand dominates an unknown one, two scalars
 /// keep the left type.
@@ -152,11 +203,13 @@ impl Symbols {
         let mut fns = HashMap::new();
         let mut structs = HashMap::new();
         let mut consts = HashMap::new();
-        Self::collect(content, &mut fns, &mut structs, &mut consts);
+        let mut methods = HashMap::new();
+        Self::collect(content, &mut fns, &mut structs, &mut consts, &mut methods);
         Self {
             fns,
             structs,
             consts,
+            methods,
         }
     }
 
@@ -165,6 +218,7 @@ impl Symbols {
         fns: &mut HashMap<String, Option<Type>>,
         structs: &mut HashMap<String, Vec<(String, Type)>>,
         consts: &mut HashMap<String, Type>,
+        methods: &mut HashMap<String, Option<Type>>,
     ) {
         for item in content {
             match item {
@@ -188,7 +242,27 @@ impl Symbols {
                 Item::Const(c) => {
                     consts.insert(c.ident.to_string(), c.ty.clone());
                 }
-                Item::Mod(m) => Self::collect(&m.content, fns, structs, consts),
+                // Nested modules are deliberately NOT collected into the
+                // enclosing table: their names must not shadow the
+                // enclosing module's (lexical scoping). `rewrite` builds
+                // each nested module its own symbol table instead.
+                Item::Impl(i) => {
+                    // Index impl-method return types by their rendered
+                    // mangled name (`Type_method`) so `Type::method()`
+                    // calls infer. Only struct-typed impls are indexed;
+                    // array/trait impls fail open.
+                    if let Type::Struct { ident, .. } = &i.self_ty {
+                        for impl_item in &i.items {
+                            if let ImplItem::Fn(f) = impl_item {
+                                let ret = match &f.return_type {
+                                    ReturnType::Type { ty, .. } => Some((**ty).clone()),
+                                    ReturnType::Default => None,
+                                };
+                                methods.insert(format!("{}_{}", ident, f.ident), ret);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -288,6 +362,7 @@ impl Symbols {
             Expr::FnCall {
                 path: FnPath::Ident(f),
                 type_args,
+                params,
                 ..
             } => {
                 let name = f.to_string();
@@ -299,6 +374,18 @@ impl Symbols {
                 // `all`/`any` reduce a vecN<bool> to bool.
                 if name == "all" || name == "any" {
                     return Some(scalar_ty(ScalarType::Bool, e.span()));
+                }
+                // The componentwise masks `cmp_eq`/`cmp_ne` return a bool
+                // vector of the same shape as their operands (#164), so
+                // mask-vs-mask comparisons still infer as vector
+                // comparisons.
+                if (name == "cmp_eq" || name == "cmp_ne") && params.len() == 2 {
+                    return match self.infer(&params[0], locals) {
+                        Some(Type::Vector { elements, .. }) => {
+                            Some(vector_ty(elements, ScalarType::Bool, e.span()))
+                        }
+                        _ => None,
+                    };
                 }
                 if let Some((elements, scalar)) = vector_ctor_alias(&name) {
                     return Some(vector_ty(elements, scalar, e.span()));
@@ -312,12 +399,23 @@ impl Symbols {
                 {
                     return Some(vector_ty(elements as u8, *ty, e.span()));
                 }
+                // Vector-preserving builtins return the type of their
+                // first argument: scalar -> scalar, vecN<T> -> vecN<T>.
+                if VECTOR_PRESERVING_BUILTINS.contains(&name.as_str()) && !params.is_empty() {
+                    return self.infer(&params[0], locals);
+                }
                 None
             }
             Expr::FnCall {
-                path: FnPath::TypeMethod { .. },
+                path: FnPath::TypeMethod { ty, method, .. },
                 ..
-            } => None,
+            } => {
+                // Impl methods: keyed by the rendered mangled name
+                // (`Type_method`). Generic methods and non-struct impls
+                // are not indexed and fail open.
+                let key = format!("{ty}_{method}");
+                self.methods.get(&key).cloned().flatten()
+            }
             Expr::Struct { ident, .. } => Some(Type::Struct {
                 ident: ident.clone(),
                 type_args: Vec::new(),

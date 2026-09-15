@@ -849,9 +849,12 @@ fn write_expr(w: &mut Writer, e: &Expr) {
                 None
             };
             if let Some(op) = lowered_as_binop {
+                // Spaced to match the Binary arm's rendering.
                 w.write("(");
                 write_expr(w, &params[0]);
+                w.write(" ");
                 w.write(binop_str(op));
+                w.write(" ");
                 write_expr(w, &params[1]);
                 w.write(")");
             } else {

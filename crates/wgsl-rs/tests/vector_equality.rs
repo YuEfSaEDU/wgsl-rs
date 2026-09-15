@@ -18,8 +18,10 @@
 use wgsl_rs::wgsl;
 
 /// The #164 repro shape: a bool-typed let binding initialized from a
-/// vector comparison. Today this renders `vecN<bool>` into a `bool`
-/// binding, which naga rejects.
+/// vector comparison. Before this fix it rendered `vecN<bool>` into a
+/// `bool` binding, which naga rejected; it must now render the wrapped
+/// `all(...)`. The `bool` annotation also keeps clippy's
+/// `let_and_return` from firing (it skips annotated bindings).
 #[wgsl(skip_validation)]
 mod eq_repro {
     use wgsl_rs::std::*;
@@ -103,6 +105,64 @@ mod eq_lowering {
     }
 }
 
+/// Review-gap cases (PR #176): comparisons whose operands come from the
+/// mask builtins, vector-preserving builtins, impl methods, or which are
+/// vulnerable to nested-module symbol shadowing, must all still infer as
+/// vector-typed and get the `all(...)` wrap.
+#[wgsl(skip_validation)]
+mod infer_gaps {
+    use wgsl_rs::std::*;
+
+    /// Masks compared with `==` are vector comparisons too.
+    pub fn mask_vs_mask(a: Vec2f, b: Vec2f, c: Vec2f, d: Vec2f) -> bool {
+        cmp_eq(a, b) == cmp_eq(c, d)
+    }
+
+    /// Mask locals via let-inference.
+    pub fn mask_local_eq(a: Vec2f, b: Vec2f, c: Vec2f, d: Vec2f) -> bool {
+        let m = cmp_eq(a, b);
+        let n = cmp_eq(c, d);
+        m == n
+    }
+
+    /// Vector-preserving builtins keep comparisons vector-typed.
+    pub fn normalize_eq(a: Vec3f, b: Vec3f) -> bool {
+        normalize(a) == normalize(b)
+    }
+
+    /// Impl methods with vector returns.
+    pub struct Helpers {
+        _v: Vec2f,
+    }
+
+    impl Helpers {
+        pub fn make(v: Vec2f) -> Vec2f {
+            v
+        }
+    }
+
+    pub fn method_call_eq(a: Vec2f, b: Vec2f) -> bool {
+        Helpers::make(a) == Helpers::make(b)
+    }
+
+    /// A nested module's `make` must not shadow the enclosing module's
+    /// `make` during inference (nested mods emit no WGSL, but their
+    /// symbols used to leak into the enclosing module's table).
+    pub fn make() -> Vec2f {
+        vec2f(0.0, 0.0)
+    }
+
+    pub fn shadowed_eq() -> bool {
+        make() == make()
+    }
+
+    mod inner {
+        pub fn make() -> f32 {
+            0.0
+        }
+    }
+}
+
 // ===== WGSL source assertions =====
 
 #[test]
@@ -135,6 +195,14 @@ fn vector_eq_ne_lower_to_all() {
         (
             "return all(a.xzy == b.zyx);",
             "multi-component swizzles are vectors",
+        ),
+        (
+            "return all((a == b));",
+            "cmp_eq lowers to the raw == operator",
+        ),
+        (
+            "return any((a != b));",
+            "cmp_ne lowers to the raw != operator",
         ),
         (
             "return all(a == b);",
@@ -179,6 +247,38 @@ fn scalar_comparisons_stay_raw() {
     );
 }
 
+#[test]
+fn infer_gaps_lower_to_all() {
+    let src = infer_gaps::WGSL_SOURCE
+        .wgsl_source()
+        .expect("render should succeed");
+    for (needle, why) in [
+        ("return all((a == b) == (c == d));", "mask == mask wraps"),
+        (
+            "let m = (a == b);",
+            "mask local binding renders the raw mask",
+        ),
+        ("return all(m == n);", "mask locals compare via =="),
+        (
+            "return all(normalize(a) == normalize(b));",
+            "vector-preserving builtins infer",
+        ),
+        (
+            "return all(Helpers_make(a) == Helpers_make(b));",
+            "impl method calls infer",
+        ),
+        (
+            "return all(make() == make());",
+            "nested module does not shadow outer symbols",
+        ),
+    ] {
+        assert!(
+            src.contains(needle),
+            "expected `{needle}` ({why}) in: {src}"
+        );
+    }
+}
+
 // ===== naga validation =====
 
 #[cfg(feature = "validation")]
@@ -193,6 +293,12 @@ fn lowering_validates() {
     eq_lowering::WGSL_SOURCE
         .validate()
         .expect("naga validation");
+}
+
+#[cfg(feature = "validation")]
+#[test]
+fn infer_gaps_validates() {
+    infer_gaps::WGSL_SOURCE.validate().expect("naga validation");
 }
 
 // ===== CPU-side parity =====
@@ -224,5 +330,15 @@ fn cpu_vector_eq_values() {
     assert!(m::mask_all_eq(v, v));
     assert!(!m::mask_all_eq(v, w));
     assert!(m::mask_any_ne(vec3f(1.0, 2.0, 3.0), vec3f(3.0, 2.0, 1.0)));
+    use infer_gaps as g;
+    assert!(g::mask_vs_mask(v, w, v, w));
+    assert!(!g::mask_vs_mask(v, w, v, v));
+    assert!(g::mask_local_eq(v, v, v, v));
+    assert!(!g::mask_local_eq(v, w, v, v));
+    assert!(g::normalize_eq(vec3f(1.0, 2.0, 3.0), vec3f(1.0, 2.0, 3.0)));
+    assert!(!g::normalize_eq(vec3f(1.0, 2.0, 3.0), vec3f(3.0, 2.0, 1.0)));
+    assert!(g::method_call_eq(v, v));
+    assert!(!g::method_call_eq(v, w));
+    assert!(g::shadowed_eq());
     assert!(!m::mask_any_ne(vec3f(1.0, 2.0, 3.0), vec3f(1.0, 2.0, 3.0)));
 }

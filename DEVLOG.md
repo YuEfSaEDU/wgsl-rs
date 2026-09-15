@@ -822,3 +822,18 @@ the GPU. No CPU-valid Rust could ever obtain the componentwise mask from
   both lowerings, naga validation, CPU parity) and a roundtrip-test
   category (`vector_equality`) driving `==`, `!=`, `cmp_eq`, `cmp_ne`
   on GPU vs CPU.
+
+**Review follow-ups (PR #176):** the initial pass failed open on three
+operand families it could have inferred, recreating the #164 bug in
+narrower shapes: `cmp_eq`/`cmp_ne` results (masks now infer as
+`vecN<bool>` of the operands' shape), vector-preserving builtins
+(`normalize`, `abs`, `min`, ... now return their first argument's type),
+and impl-method calls (`Type::method()` now infers via a
+`Type_method`-keyed table built from concrete struct impls). Nested
+modules are no longer folded into the enclosing module's symbol table —
+their names used to shadow the enclosing module's functions during
+inference. The binary-operator rendering now spaces its operator
+(`(a == b)`) to match the ordinary Binary arm. One Copilot claim was
+verified false: clippy's `let_and_return` does not fire on the repro
+(annotated `let` bindings are exempt) and the CI clippy job uploads
+SARIF with `continue-on-error` rather than failing on warnings.
