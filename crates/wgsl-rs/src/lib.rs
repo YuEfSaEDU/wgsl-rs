@@ -907,6 +907,7 @@ mod test {
         assert_eq!(v2, 42.0);
     }
 
+    #[cfg(feature = "validation")]
     #[test]
     fn generic_module_validate_rejects_template() {
         // `validate()` returns an error for template sources — they have

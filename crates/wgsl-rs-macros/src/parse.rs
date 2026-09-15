@@ -1240,6 +1240,46 @@ pub(crate) fn builtin_wgsl_type_name(name: &str) -> Option<String> {
     None
 }
 
+/// Scan for builtin associated-constant usage (`Vec3f::X` style) in a
+/// module, to decide whether `std::builtin_constants` must be imported.
+#[derive(Default)]
+struct BuiltinConstUsageScan {
+    /// A `TypePath` expression whose type is a builtin alias was found.
+    used: bool,
+    /// Statement macros hold unparsed token strings; if any are present
+    /// the scan can't see inside them, so assume usage is possible.
+    has_stmt_macro: bool,
+}
+
+impl crate::parse_visitor::ParseVisitorMut for BuiltinConstUsageScan {
+    fn visit_expr(&mut self, e: &mut Expr) -> Result<(), Error> {
+        if let Expr::TypePath { ty, .. } = e {
+            let t = ty.to_string();
+            if builtin_wgsl_type_name(&t).is_some() {
+                self.used = true;
+            }
+        }
+        crate::parse_visitor::walk_expr(self, e)
+    }
+
+    fn visit_stmt(&mut self, s: &mut Stmt) -> Result<(), Error> {
+        if matches!(s, Stmt::Macro { .. }) {
+            self.has_stmt_macro = true;
+        }
+        crate::parse_visitor::walk_stmt(self, s)
+    }
+}
+
+/// Returns true when the module references a builtin associated constant
+/// (or contains statement macros, whose contents the scan cannot see).
+fn scan_for_builtin_const_usage(module: &mut ItemMod) -> bool {
+    let mut scan = BuiltinConstUsageScan::default();
+    for item in module.content.iter_mut() {
+        let _ = crate::parse_visitor::walk_item(&mut scan, item);
+    }
+    scan.used || scan.has_stmt_macro
+}
+
 impl Type {
     /// Parse a `syn::Type` into a WGSL `Type`, using the given context to
     /// resolve type parameter names.
@@ -5365,7 +5405,7 @@ impl ItemMod {
         attrs_contain_wgsl_ignore(attrs)
     }
 
-    pub fn imports(&self, wgsl_rs_crate_path: &syn::Path) -> Vec<proc_macro2::TokenStream> {
+    pub fn imports(&mut self, wgsl_rs_crate_path: &syn::Path) -> Vec<proc_macro2::TokenStream> {
         fn is_wgsl_std(wgsl_rs_crate_path: &syn::Path, path: &syn::Path) -> bool {
             let wgsl_std = {
                 let mut std = wgsl_rs_crate_path.clone();
@@ -5383,16 +5423,26 @@ impl ItemMod {
             wgsl_std == path
         }
 
+        // Only import `builtin_constants` when the module actually uses a
+        // builtin associated constant (`Vec3f::X` style). Importing
+        // unconditionally injects ~58 const declarations into every
+        // std-importing module, where names can collide with user-declared
+        // consts (e.g. a user `const vec2f_ZERO` would be a redefinition).
+        let uses_builtin_consts = scan_for_builtin_const_usage(self);
+
         let mut imports = vec![];
         for item in self.content.iter() {
             if let Item::Use(use_item) = item {
                 for path in use_item.modules.iter() {
-                    // If this import is `use wgsl_rs::std::*;`, only import built-in constants,
-                    // e.g. Vec3f::ZERO
+                    // If this import is `use wgsl_rs::std::*;`, import the
+                    // built-in constants (e.g. Vec3f::ZERO) only when one is
+                    // actually used by the module.
                     if is_wgsl_std(wgsl_rs_crate_path, path) {
-                        imports.push(quote! {
-                            #wgsl_rs_crate_path::std::builtin_constants::WGSL_SOURCE
-                        });
+                        if uses_builtin_consts {
+                            imports.push(quote! {
+                                #wgsl_rs_crate_path::std::builtin_constants::WGSL_SOURCE
+                            });
+                        }
                         continue;
                     }
 
@@ -7978,6 +8028,74 @@ mod test {
         let expr: syn::Expr = syn::parse_quote! { MyMat2x2f::B };
         let expr = Expr::try_from(&expr).unwrap();
         assert_eq!(expr.to_wgsl(), "MyMat2x2f_B");
+    }
+
+    #[test]
+    fn type_path_with_builtin_name_is_converted() {
+        let expr: syn::Expr = syn::parse_quote! { Vec3f::X };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "vec3f_X");
+
+        let expr: syn::Expr = syn::parse_quote! { Mat2x2f::ZERO };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "mat2x2f_ZERO");
+    }
+
+    #[test]
+    fn stmt_macro_forces_builtin_constants_import() {
+        // Statement macro args are opaque token strings, so the usage scan
+        // cannot see inside them — any statement macro must conservatively
+        // import the builtin constants.
+        let crate_path: syn::Path = syn::parse_quote!(wgsl_rs);
+        let item: syn::Item = syn::parse_quote! {
+            mod with_macro {
+                use wgsl_rs::std::*;
+
+                pub fn f() {
+                    unknown_macro!(a, b, c);
+                }
+            }
+        };
+        let Item::Mod(mut m) = Item::try_from(&item).unwrap() else {
+            panic!("expected module");
+        };
+        let imports: Vec<String> = m
+            .imports(&crate_path)
+            .iter()
+            .map(|ts| ts.to_string())
+            .collect();
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.contains("builtin_constants") && i.contains("WGSL_SOURCE")),
+            "a statement macro must force the builtin_constants import, got {imports:?}"
+        );
+
+        // Without a statement macro and without constant usage, nothing
+        // must be imported.
+        let item: syn::Item = syn::parse_quote! {
+            mod without_macro {
+                use wgsl_rs::std::*;
+
+                pub fn f() {
+                    let x = 1.0;
+                }
+            }
+        };
+        let Item::Mod(mut m) = Item::try_from(&item).unwrap() else {
+            panic!("expected module");
+        };
+        let imports: Vec<String> = m
+            .imports(&crate_path)
+            .iter()
+            .map(|ts| ts.to_string())
+            .collect();
+        assert!(
+            !imports
+                .iter()
+                .any(|i| i.contains("builtin_constants") && i.contains("WGSL_SOURCE")),
+            "unused builtin constants must not be imported, got {imports:?}"
+        );
     }
 
     // WGSL code generation tests for impl constants
