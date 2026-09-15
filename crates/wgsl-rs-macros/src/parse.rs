@@ -2744,6 +2744,23 @@ impl Expr {
                         .fail();
                     };
 
+                    // Binary-operator builtins (cmp_eq / cmp_ne) lower to
+                    // infix operators at render time (#164): they must be
+                    // called with exactly two arguments and no turbofish.
+                    if let FnPath::Ident(id) = &fn_path
+                        && crate::builtins::is_operator_builtin(&id.to_string()).is_some()
+                        && (args.len() != 2 || !type_args.is_empty() || !const_args.is_empty())
+                    {
+                        return UnsupportedSnafu {
+                            span: id.span(),
+                            note: format!(
+                                "`{id}` is a binary-operator builtin: call it with exactly two \
+                                 arguments and no turbofish, e.g. `{id}(a, b)`"
+                            ),
+                        }
+                        .fail();
+                    }
+
                     let paren_token = *paren_token;
                     let mut params = syn::punctuated::Punctuated::new();
                     for pair in args.pairs() {

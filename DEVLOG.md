@@ -771,3 +771,54 @@ NUL-separated — and XOR-ing in the per-process counter (see
   versions — which rules out `DefaultHasher`.
 - Outside cargo the env vars are absent, and ids degrade to the old
   counter-only scheme, so non-cargo builds behave exactly as before.
+
+### 2026-09-15: Vector `==`/`!=` lowering and `cmp_eq`/`cmp_ne` masks (issue #164)
+
+**Problem:** Rust's `==` on vectors yields a `bool` (elementwise-all,
+per `PartialEq`), but WGSL's `==` yields a `vecN<bool>` mask. So
+`let x: bool = vec2f(0., 0.) == vec2f(0., 0.);` compiled in Rust but
+produced WGSL where a `vecN<bool>` fed a `bool` binding — naga rejected
+the shader. Worse, the mismatch was a silent CPU/GPU divergence: an
+unannotated `let m = a == b;` is `bool` on the CPU and `vecN<bool>` on
+the GPU. No CPU-valid Rust could ever obtain the componentwise mask from
+`==`, because `==` *is* `bool` in Rust.
+
+**Decision:** two composed lowerings.
+1. A post-monomorphization pass (`wgsl-rs-macros/src/vector_cmp.rs`)
+   walks the parse AST and rewrites vector `==` to `all(lhs == rhs)` and
+   `!=` to `!(all(lhs == rhs))` when both operands infer vector-typed.
+   Inference uses a module symbol table (fn returns, struct fields,
+   module consts) plus per-function locals walked in statement order
+   with proper scoping; constructors, casts, swizzles, indexing and
+   arithmetic propagate types. The inner operator of the `!=` wrap is
+   `==`: `all(a != b)` means "every component differs", which is not
+   `PartialEq::ne`. Types that cannot be inferred are left untouched
+   (fail-open) so CPU-only code keeps compiling and un-inferable
+   comparisons behave exactly as before.
+2. `cmp_eq(a, b)` / `cmp_ne(a, b)` free functions in std are the
+   componentwise escape hatch. They render as the raw WGSL operators
+   `(a == b)` / `(a != b)` via a new `BINARY_OPS` table in
+   `builtin_lookup`, extended to accept operator entries; the macros
+   crate mirrors the table (names reserved against user definitions,
+   arity/turbofish checked at parse time). The Rust return type is free
+   to vary per impl (an associated `Mask` type — generic over
+   `Vec2/3/4<T: PartialEq>`).
+
+**Justification:**
+- Post-mono placement means monomorphized generic functions have
+  concrete parameter types and get wrapped. Runtime-instantiated generic
+  entry-point templates still carry `TypeParam` types when their IR is
+  built, so vector `==` inside them is not wrapped — the same known
+  limitation as the #160 `!` -> `~` lowering.
+- `cmp_eq` lowers at render time, not in the pass: a `FnCall` node can
+  never be re-wrapped by (1), so the two lowerings cannot interfere.
+- Fail-open beats erroring: today a vector `==` compiles on the CPU via
+  Rust's `PartialEq`, and erroring on un-inferable comparisons would
+  break working CPU-only code.
+- Discovered along the way (not fixed here, separate issue): bool-vector
+  types in signatures render as the literal alias `vec2b`, which naga
+  rejects as an unknown identifier.
+- Tests: `wgsl-rs/tests/vector_equality.rs` (exact-substring pinning of
+  both lowerings, naga validation, CPU parity) and a roundtrip-test
+  category (`vector_equality`) driving `==`, `!=`, `cmp_eq`, `cmp_ne`
+  on GPU vs CPU.

@@ -10,6 +10,8 @@
 //! proc-macro crate). The two should be kept in sync; tests should pin
 //! both copies.
 
+use crate::BinOp;
+
 const TABLE: &[(&str, &str)] = &[
     // Boolean vector aliases
     ("vec2b", "vec2<bool>"),
@@ -168,4 +170,46 @@ pub fn lookup(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(rust, _)| *rust == name)
         .map(|(_, wgsl)| *wgsl)
+}
+
+/// Rust builtin function names that lower to binary operators instead of
+/// function calls (#164). A two-argument call to one of these renders as
+/// the infix operator applied to its arguments: `cmp_eq(a, b)` renders
+/// as `(a == b)`.
+///
+/// This is the componentwise comparison escape hatch for vectors: the
+/// transpiler lowers Rust's vector `==` to `all(a == b)` (a `bool`,
+/// matching `PartialEq`), while `cmp_eq` yields WGSL's `vecN<bool>` mask.
+///
+/// Mirrored in `wgsl-rs-macros/src/builtins.rs` (`BUILTIN_BINARY_OPS`);
+/// keep the two in sync.
+pub const BINARY_OPS: &[(&str, BinOp)] = &[
+    // (rust_snake_case, wgsl operator)
+    ("cmp_eq", BinOp::Eq),
+    ("cmp_ne", BinOp::Ne),
+];
+
+/// Look up a Rust builtin function name that lowers to a binary operator.
+///
+/// Returns `None` for names that render as ordinary function calls.
+pub fn lookup_binary_op(name: &str) -> Option<BinOp> {
+    BINARY_OPS
+        .iter()
+        .find(|(rust, _)| *rust == name)
+        .map(|(_, op)| *op)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_op_lookup() {
+        assert_eq!(lookup_binary_op("cmp_eq"), Some(BinOp::Eq));
+        assert_eq!(lookup_binary_op("cmp_ne"), Some(BinOp::Ne));
+        // Not (yet) operator builtins.
+        assert_eq!(lookup_binary_op("cmp_lt"), None);
+        assert_eq!(lookup_binary_op("sin"), None);
+        assert_eq!(lookup_binary_op("cmp_eqx"), None);
+    }
 }

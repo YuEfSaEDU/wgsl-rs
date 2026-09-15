@@ -160,6 +160,30 @@ pub const BUILTIN_CASE_NAME_MAP: &[(&str, &str)] = &[
     ("texture_store_array", "textureStore"),
 ];
 
+/// Rust builtin function names that lower to binary operators during
+/// rendering. A two-argument call to one of these renders as the infix
+/// operator applied to its arguments: `cmp_eq(a, b)` -> `(a == b)`. This
+/// is the componentwise comparison escape hatch for vectors (#164).
+///
+/// The render-side lowering lives in `wgsl-rs-ir`'s `builtin_lookup`
+/// (`BINARY_OPS`); this copy exists so the macro can (a) reserve the
+/// names against user definitions and (b) reject bad arity at parse time.
+/// Keep the two tables in sync.
+pub const BUILTIN_BINARY_OPS: &[(&str, &str)] = &[
+    // (rust_snake_case, wgsl operator)
+    ("cmp_eq", "=="),
+    ("cmp_ne", "!="),
+];
+
+/// Checks if a name refers to a binary-operator builtin (`cmp_eq`,
+/// `cmp_ne`). Returns the WGSL operator it renders as.
+pub fn is_operator_builtin(name: &str) -> Option<&'static str> {
+    BUILTIN_BINARY_OPS
+        .iter()
+        .find(|(rust, _)| *rust == name)
+        .map(|(_, op)| *op)
+}
+
 /// Looks up the WGSL name for a Rust function name.
 ///
 /// Returns `Some(wgsl_name)` if translation is needed, `None` if the name
@@ -180,9 +204,15 @@ pub fn lookup_wgsl_name(rust_name: &str) -> Option<&'static str> {
 ///
 /// Returns `Some((rust_name, wgsl_name))` if reserved, `None` otherwise.
 pub fn is_reserved_builtin(name: &str) -> Option<(&'static str, &'static str)> {
-    BUILTIN_CASE_NAME_MAP
+    if let Some(entry) = BUILTIN_CASE_NAME_MAP
         .iter()
         .find(|(rust, wgsl)| *rust == name || *wgsl == name)
+    {
+        return Some(*entry);
+    }
+    BUILTIN_BINARY_OPS
+        .iter()
+        .find(|(rust, _)| *rust == name)
         .copied()
 }
 
@@ -219,6 +249,15 @@ mod tests {
     fn is_reserved_matches_wgsl_name() {
         let result = is_reserved_builtin("countLeadingZeros");
         assert_eq!(result, Some(("count_leading_zeros", "countLeadingZeros")));
+    }
+
+    #[test]
+    fn operator_builtins_are_reserved() {
+        assert!(is_reserved_builtin("cmp_eq").is_some());
+        assert!(is_reserved_builtin("cmp_ne").is_some());
+        assert_eq!(is_operator_builtin("cmp_eq"), Some("=="));
+        assert_eq!(is_operator_builtin("cmp_ne"), Some("!="));
+        assert_eq!(is_operator_builtin("cmp_lt"), None);
     }
 
     #[test]
