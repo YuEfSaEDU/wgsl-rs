@@ -1902,6 +1902,9 @@ mod builtin_import_regression_tests {
         assert_eq!(src.matches("const vec2f_ZERO").count(), 1);
         assert!(src.contains("9.0"));
         assert_eq!(std_import_no_const_usage::vec2f_ZERO.x, 9.0);
+        // Validation needs the optional `validation` feature (naga); the
+        // import/source assertions above run unconditionally.
+        #[cfg(feature = "validation")]
         std_import_no_const_usage::WGSL_SOURCE.validate().unwrap();
     }
 
@@ -1918,6 +1921,7 @@ mod builtin_import_regression_tests {
     fn std_import_with_const_usage_imports_builtin_constants() {
         let src = std_import_const_usage::WGSL_SOURCE.wgsl_source().unwrap();
         assert!(src.contains("vec4f_X + vec4f_ONE"));
+        #[cfg(feature = "validation")]
         std_import_const_usage::WGSL_SOURCE.validate().unwrap();
     }
 }

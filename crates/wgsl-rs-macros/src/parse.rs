@@ -8041,6 +8041,63 @@ mod test {
         assert_eq!(expr.to_wgsl(), "mat2x2f_ZERO");
     }
 
+    #[test]
+    fn stmt_macro_forces_builtin_constants_import() {
+        // Statement macro args are opaque token strings, so the usage scan
+        // cannot see inside them — any statement macro must conservatively
+        // import the builtin constants.
+        let crate_path: syn::Path = syn::parse_quote!(wgsl_rs);
+        let item: syn::Item = syn::parse_quote! {
+            mod with_macro {
+                use wgsl_rs::std::*;
+
+                pub fn f() {
+                    unknown_macro!(a, b, c);
+                }
+            }
+        };
+        let Item::Mod(mut m) = Item::try_from(&item).unwrap() else {
+            panic!("expected module");
+        };
+        let imports: Vec<String> = m
+            .imports(&crate_path)
+            .iter()
+            .map(|ts| ts.to_string())
+            .collect();
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.contains("builtin_constants") && i.contains("WGSL_SOURCE")),
+            "a statement macro must force the builtin_constants import, got {imports:?}"
+        );
+
+        // Without a statement macro and without constant usage, nothing
+        // must be imported.
+        let item: syn::Item = syn::parse_quote! {
+            mod without_macro {
+                use wgsl_rs::std::*;
+
+                pub fn f() {
+                    let x = 1.0;
+                }
+            }
+        };
+        let Item::Mod(mut m) = Item::try_from(&item).unwrap() else {
+            panic!("expected module");
+        };
+        let imports: Vec<String> = m
+            .imports(&crate_path)
+            .iter()
+            .map(|ts| ts.to_string())
+            .collect();
+        assert!(
+            !imports
+                .iter()
+                .any(|i| i.contains("builtin_constants") && i.contains("WGSL_SOURCE")),
+            "unused builtin constants must not be imported, got {imports:?}"
+        );
+    }
+
     // WGSL code generation tests for impl constants
     #[test]
     fn impl_const_generates_mangled_name() {
