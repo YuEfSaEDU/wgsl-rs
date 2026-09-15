@@ -1898,7 +1898,9 @@ mod builtin_import_regression_tests {
     fn std_import_without_const_usage_skips_builtin_constants_import() {
         // The user const must not collide with the builtin `vec2f_ZERO`,
         // which is only imported when a builtin constant is used.
-        let src = std_import_no_const_usage::WGSL_SOURCE.wgsl_source().unwrap();
+        let src = std_import_no_const_usage::WGSL_SOURCE
+            .wgsl_source()
+            .unwrap();
         assert_eq!(src.matches("const vec2f_ZERO").count(), 1);
         assert!(src.contains("9.0"));
         assert_eq!(std_import_no_const_usage::vec2f_ZERO.x, 9.0);
