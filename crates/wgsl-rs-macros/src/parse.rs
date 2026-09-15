@@ -1211,6 +1211,35 @@ fn split_as_mat(s: &str) -> Option<MatAlias<'_>> {
     None
 }
 
+/// Converts the Rust type name to the WGSL type name for WGSL builtin types
+/// e.g. `Vec3f` -> `vec3f`, `Mat2x3f` -> `mat2x3f`
+pub(crate) fn builtin_wgsl_type_name(name: &str) -> Option<String> {
+    // Anchor on the full identifier: `split_as_vec`/`split_as_mat` accept any
+    // ident containing `Vec`/`Mat` (e.g. `MyVec3f`), which would misconvert
+    // user-defined lookalikes into builtin names.
+    if name.starts_with("Vec")
+        && let Some((elements, suffix)) = split_as_vec(name)
+        && matches!(elements, "2" | "3" | "4")
+        && matches!(suffix, "f" | "i" | "u" | "b")
+    {
+        return Some(format!("vec{elements}{suffix}"));
+    }
+
+    if name.starts_with("Mat")
+        && let Some(MatAlias {
+            columns,
+            rows,
+            suffix: "f",
+        }) = split_as_mat(name)
+        && matches!(columns, "2" | "3" | "4")
+        && matches!(rows, "2" | "3" | "4")
+    {
+        return Some(format!("mat{columns}x{rows}f"));
+    }
+
+    None
+}
+
 impl Type {
     /// Parse a `syn::Type` into a WGSL `Type`, using the given context to
     /// resolve type parameter names.
@@ -3709,10 +3738,15 @@ fn parse_wgsl_allow(attrs: &[syn::Attribute]) -> Result<Vec<WarningName>, Error>
 
 /// Parse `#[wgsl_ignore]` attribute.
 ///
-/// Returns `true` if `wgsl_ignore` was recognized.
+/// Returns `true` if an attribute ending in `wgsl_ignore` was recognized.
 fn attrs_contain_wgsl_ignore(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
-        if attr.path().is_ident("wgsl_ignore") {
+        if attr
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "wgsl_ignore")
+        {
             return true;
         }
     }
@@ -5353,9 +5387,12 @@ impl ItemMod {
         for item in self.content.iter() {
             if let Item::Use(use_item) = item {
                 for path in use_item.modules.iter() {
-                    // If this import is `use wgsl_rs::std::*;`, skip any importing
-                    // on the WGSL side.
+                    // If this import is `use wgsl_rs::std::*;`, only import built-in constants,
+                    // e.g. Vec3f::ZERO
                     if is_wgsl_std(wgsl_rs_crate_path, path) {
+                        imports.push(quote! {
+                            #wgsl_rs_crate_path::std::builtin_constants::WGSL_SOURCE
+                        });
                         continue;
                     }
 
@@ -7928,6 +7965,19 @@ mod test {
         let expr = Expr::try_from(&expr).unwrap();
         let wgsl = expr.to_wgsl();
         assert_eq!(wgsl, "Light_INTENSITY");
+    }
+
+    #[test]
+    fn type_path_with_builtin_lookalike_name_is_not_converted() {
+        // Identifiers that merely contain `Vec`/`Mat` (e.g. `MyVec3f`)
+        // must not be treated as builtin type aliases.
+        let expr: syn::Expr = syn::parse_quote! { MyVec3f::A };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "MyVec3f_A");
+
+        let expr: syn::Expr = syn::parse_quote! { MyMat2x2f::B };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "MyMat2x2f_B");
     }
 
     // WGSL code generation tests for impl constants
