@@ -1214,18 +1214,23 @@ fn split_as_mat(s: &str) -> Option<MatAlias<'_>> {
 /// Converts the Rust type name to the WGSL type name for WGSL builtin types
 /// e.g. `Vec3f` -> `vec3f`, `Mat2x3f` -> `mat2x3f`
 pub(crate) fn builtin_wgsl_type_name(name: &str) -> Option<String> {
-    if let Some((elements, suffix)) = split_as_vec(name)
+    // Anchor on the full identifier: `split_as_vec`/`split_as_mat` accept any
+    // ident containing `Vec`/`Mat` (e.g. `MyVec3f`), which would misconvert
+    // user-defined lookalikes into builtin names.
+    if name.starts_with("Vec")
+        && let Some((elements, suffix)) = split_as_vec(name)
         && matches!(elements, "2" | "3" | "4")
         && matches!(suffix, "f" | "i" | "u" | "b")
     {
         return Some(format!("vec{elements}{suffix}"));
     }
 
-    if let Some(MatAlias {
-        columns,
-        rows,
-        suffix: "f",
-    }) = split_as_mat(name)
+    if name.starts_with("Mat")
+        && let Some(MatAlias {
+            columns,
+            rows,
+            suffix: "f",
+        }) = split_as_mat(name)
         && matches!(columns, "2" | "3" | "4")
         && matches!(rows, "2" | "3" | "4")
     {
@@ -7960,6 +7965,19 @@ mod test {
         let expr = Expr::try_from(&expr).unwrap();
         let wgsl = expr.to_wgsl();
         assert_eq!(wgsl, "Light_INTENSITY");
+    }
+
+    #[test]
+    fn type_path_with_builtin_lookalike_name_is_not_converted() {
+        // Identifiers that merely contain `Vec`/`Mat` (e.g. `MyVec3f`)
+        // must not be treated as builtin type aliases.
+        let expr: syn::Expr = syn::parse_quote! { MyVec3f::A };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "MyVec3f_A");
+
+        let expr: syn::Expr = syn::parse_quote! { MyMat2x2f::B };
+        let expr = Expr::try_from(&expr).unwrap();
+        assert_eq!(expr.to_wgsl(), "MyMat2x2f_B");
     }
 
     // WGSL code generation tests for impl constants
