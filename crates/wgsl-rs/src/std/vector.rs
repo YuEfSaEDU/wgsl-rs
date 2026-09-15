@@ -1632,6 +1632,7 @@ pub mod builtin_vector_constants {
     impl Vec2f {
         pub const ZERO: Vec2f = vec2f(0.0, 0.0);
         pub const ONE: Vec2f = vec2f(1.0, 1.0);
+        pub const NEG_ONE: Vec2f = vec2f(-1.0, -1.0);
         pub const X: Vec2f = vec2f(1.0, 0.0);
         pub const Y: Vec2f = vec2f(0.0, 1.0);
     }
@@ -1639,6 +1640,7 @@ pub mod builtin_vector_constants {
     impl Vec3f {
         pub const ZERO: Vec3f = vec3f(0.0, 0.0, 0.0);
         pub const ONE: Vec3f = vec3f(1.0, 1.0, 1.0);
+        pub const NEG_ONE: Vec3f = vec3f(-1.0, -1.0, -1.0);
         pub const X: Vec3f = vec3f(1.0, 0.0, 0.0);
         pub const Y: Vec3f = vec3f(0.0, 1.0, 0.0);
         pub const Z: Vec3f = vec3f(0.0, 0.0, 1.0);
@@ -1647,6 +1649,7 @@ pub mod builtin_vector_constants {
     impl Vec4f {
         pub const ZERO: Vec4f = vec4f(0.0, 0.0, 0.0, 0.0);
         pub const ONE: Vec4f = vec4f(1.0, 1.0, 1.0, 1.0);
+        pub const NEG_ONE: Vec4f = vec4f(-1.0, -1.0, -1.0, -1.0);
         pub const X: Vec4f = vec4f(1.0, 0.0, 0.0, 0.0);
         pub const Y: Vec4f = vec4f(0.0, 1.0, 0.0, 0.0);
         pub const Z: Vec4f = vec4f(0.0, 0.0, 1.0, 0.0);
@@ -1680,6 +1683,7 @@ pub mod builtin_vector_constants {
     impl Vec2i {
         pub const ZERO: Vec2i = vec2i(0, 0);
         pub const ONE: Vec2i = vec2i(1, 1);
+        pub const NEG_ONE: Vec2i = vec2i(-1, -1);
         pub const X: Vec2i = vec2i(1, 0);
         pub const Y: Vec2i = vec2i(0, 1);
     }
@@ -1687,6 +1691,7 @@ pub mod builtin_vector_constants {
     impl Vec3i {
         pub const ZERO: Vec3i = vec3i(0, 0, 0);
         pub const ONE: Vec3i = vec3i(1, 1, 1);
+        pub const NEG_ONE: Vec3i = vec3i(-1, -1, -1);
         pub const X: Vec3i = vec3i(1, 0, 0);
         pub const Y: Vec3i = vec3i(0, 1, 0);
         pub const Z: Vec3i = vec3i(0, 0, 1);
@@ -1695,6 +1700,7 @@ pub mod builtin_vector_constants {
     impl Vec4i {
         pub const ZERO: Vec4i = vec4i(0, 0, 0, 0);
         pub const ONE: Vec4i = vec4i(1, 1, 1, 1);
+        pub const NEG_ONE: Vec4i = vec4i(-1, -1, -1, -1);
         pub const X: Vec4i = vec4i(1, 0, 0, 0);
         pub const Y: Vec4i = vec4i(0, 1, 0, 0);
         pub const Z: Vec4i = vec4i(0, 0, 1, 0);
@@ -1762,17 +1768,20 @@ mod test {
             pub fn _main() {
                 let _v2f_zero = Vec2f::ZERO;
                 let _v2f_one = Vec2f::ONE;
+                let _v2f_neg_one = Vec2f::NEG_ONE;
                 let _v2f_x = Vec2f::X;
                 let _v2f_y = Vec2f::Y;
 
                 let _v3f_zero = Vec3f::ZERO;
                 let _v3f_one = Vec3f::ONE;
+                let _v3f_neg_one = Vec3f::NEG_ONE;
                 let _v3f_x = Vec3f::X;
                 let _v3f_y = Vec3f::Y;
                 let _v3f_z = Vec3f::Z;
 
                 let _v4f_zero = Vec4f::ZERO;
                 let _v4f_one = Vec4f::ONE;
+                let _v4f_neg_one = Vec4f::NEG_ONE;
                 let _v4f_x = Vec4f::X;
                 let _v4f_y = Vec4f::Y;
                 let _v4f_z = Vec4f::Z;
@@ -1798,17 +1807,20 @@ mod test {
 
                 let _v2i_zero = Vec2i::ZERO;
                 let _v2i_one = Vec2i::ONE;
+                let _v2i_neg_one = Vec2i::NEG_ONE;
                 let _v2i_x = Vec2i::X;
                 let _v2i_y = Vec2i::Y;
 
                 let _v3i_zero = Vec3i::ZERO;
                 let _v3i_one = Vec3i::ONE;
+                let _v3i_neg_one = Vec3i::NEG_ONE;
                 let _v3i_x = Vec3i::X;
                 let _v3i_y = Vec3i::Y;
                 let _v3i_z = Vec3i::Z;
 
                 let _v4i_zero = Vec4i::ZERO;
                 let _v4i_one = Vec4i::ONE;
+                let _v4i_neg_one = Vec4i::NEG_ONE;
                 let _v4i_x = Vec4i::X;
                 let _v4i_y = Vec4i::Y;
                 let _v4i_z = Vec4i::Z;

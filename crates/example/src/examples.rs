@@ -1944,5 +1944,7 @@ pub mod builtin_constants {
         let _v0 = Vec4f::X + Vec4f::ONE;
         let _v1 = Vec3u::ZERO;
         let _v2 = Vec2i::Y - Vec2i::X;
+        // signed vectors also have `NEG_ONE`
+        let _v3 = Vec3i::NEG_ONE;
     }
 }
