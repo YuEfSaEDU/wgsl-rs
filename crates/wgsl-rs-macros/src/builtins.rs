@@ -268,7 +268,8 @@ mod tests {
             assert_eq!(
                 ir_lookup::lookup_binary_op(rust),
                 Some(expected),
-                "BUILTIN_BINARY_OPS says {rust} renders as {op_str}, but wgsl-rs-ir's BINARY_OPS disagrees"
+                "BUILTIN_BINARY_OPS says {rust} renders as {op_str}, but wgsl-rs-ir's BINARY_OPS \
+                 disagrees"
             );
         }
         for (rust, _) in ir_lookup::BINARY_OPS {
