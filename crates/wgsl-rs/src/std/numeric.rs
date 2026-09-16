@@ -1518,6 +1518,100 @@ mod any {
     }
 }
 
+/// Provides the componentwise comparison [`cmp_eq`].
+///
+/// Rust's `==` on vectors yields a `bool` (elementwise-all, per
+/// `PartialEq`), but WGSL's `==` yields a `vecN<bool>` mask. The
+/// transpiler lowers vector `==` to `all(lhs == rhs)` (wgsl-rs#164);
+/// [`cmp_eq`] is the escape hatch that keeps the componentwise mask on
+/// both sides — on the GPU it renders as the raw `(a == b)` operator.
+pub trait CmpEq {
+    /// The bool-vector mask this comparison produces.
+    type Mask;
+    /// Componentwise equality: one bool per component.
+    fn cmp_eq(self, other: Self) -> Self::Mask;
+}
+
+/// Componentwise vector equality: returns a bool-vector mask.
+///
+/// Lowers to WGSL's `(a == b)` operator.
+pub fn cmp_eq<T: CmpEq>(a: T, b: T) -> <T as CmpEq>::Mask {
+    <T as CmpEq>::cmp_eq(a, b)
+}
+
+/// Provides the componentwise comparison [`cmp_ne`].
+///
+/// See [`CmpEq`] for why this exists alongside `!=`.
+pub trait CmpNe {
+    /// The bool-vector mask this comparison produces.
+    type Mask;
+    /// Componentwise inequality: one bool per component.
+    fn cmp_ne(self, other: Self) -> Self::Mask;
+}
+
+/// Componentwise vector inequality: returns a bool-vector mask.
+///
+/// Lowers to WGSL's `(a != b)` operator.
+pub fn cmp_ne<T: CmpNe>(a: T, b: T) -> <T as CmpNe>::Mask {
+    <T as CmpNe>::cmp_ne(a, b)
+}
+
+mod cmp {
+    use super::*;
+
+    impl<T: PartialEq> CmpEq for Vec2<T> {
+        type Mask = Vec2<bool>;
+        fn cmp_eq(self, other: Self) -> Self::Mask {
+            Vec2::vec2(self.x == other.x, self.y == other.y)
+        }
+    }
+
+    impl<T: PartialEq> CmpEq for Vec3<T> {
+        type Mask = Vec3<bool>;
+        fn cmp_eq(self, other: Self) -> Self::Mask {
+            Vec3::vec3(self.x == other.x, self.y == other.y, self.z == other.z)
+        }
+    }
+
+    impl<T: PartialEq> CmpEq for Vec4<T> {
+        type Mask = Vec4<bool>;
+        fn cmp_eq(self, other: Self) -> Self::Mask {
+            Vec4::vec4(
+                self.x == other.x,
+                self.y == other.y,
+                self.z == other.z,
+                self.w == other.w,
+            )
+        }
+    }
+
+    impl<T: PartialEq> CmpNe for Vec2<T> {
+        type Mask = Vec2<bool>;
+        fn cmp_ne(self, other: Self) -> Self::Mask {
+            Vec2::vec2(self.x != other.x, self.y != other.y)
+        }
+    }
+
+    impl<T: PartialEq> CmpNe for Vec3<T> {
+        type Mask = Vec3<bool>;
+        fn cmp_ne(self, other: Self) -> Self::Mask {
+            Vec3::vec3(self.x != other.x, self.y != other.y, self.z != other.z)
+        }
+    }
+
+    impl<T: PartialEq> CmpNe for Vec4<T> {
+        type Mask = Vec4<bool>;
+        fn cmp_ne(self, other: Self) -> Self::Mask {
+            Vec4::vec4(
+                self.x != other.x,
+                self.y != other.y,
+                self.z != other.z,
+                self.w != other.w,
+            )
+        }
+    }
+}
+
 /// Provides the numeric built-in function `distance`.
 pub trait NumericBuiltinDistance {
     /// Returns the distance between e1 and e2.

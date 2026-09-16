@@ -35,6 +35,8 @@
 //!   `radians`
 //! - [`logical_operations`] — Logical builtins: `all`, `any` on bool vectors
 //!   (Vec2b, Vec3b, Vec4b)
+//! - [`vector_equality`] — Vector comparisons (#164): `==`/`!=` lowered to
+//!   `all(...)`/`!(all(...))`, plus the `cmp_eq`/`cmp_ne` componentwise masks
 //! - [`select_operations`] — Conditional selection: `select` on scalar and
 //!   vector types (f32, i32, u32) with scalar and vector bool conditions
 //! - [`matrix_operations`] — Matrix builtins and arithmetic: `determinant`,
@@ -81,6 +83,7 @@ pub mod texture_operations;
 pub mod trig;
 pub mod type_conversions;
 pub mod vector_arithmetic;
+pub mod vector_equality;
 
 use crate::harness::RoundtripTest;
 
@@ -98,6 +101,7 @@ pub fn all_tests() -> Vec<Box<dyn RoundtripTest>> {
         Box::new(modf_frexp_ldexp::ModfFrexpLdexpTest),
         Box::new(type_conversions::TypeConversionsTest),
         Box::new(vector_arithmetic::VectorArithmeticTest),
+        Box::new(vector_equality::VectorEqualityTest),
         Box::new(basic_numeric::BasicNumericTest),
         Box::new(logical_operations::LogicalOperationsTest),
         Box::new(select_operations::SelectOperationsTest),

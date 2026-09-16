@@ -160,6 +160,30 @@ pub const BUILTIN_CASE_NAME_MAP: &[(&str, &str)] = &[
     ("texture_store_array", "textureStore"),
 ];
 
+/// Rust builtin function names that lower to binary operators during
+/// rendering. A two-argument call to one of these renders as the infix
+/// operator applied to its arguments: `cmp_eq(a, b)` -> `(a == b)`. This
+/// is the componentwise comparison escape hatch for vectors (#164).
+///
+/// The render-side lowering lives in `wgsl-rs-ir`'s `builtin_lookup`
+/// (`BINARY_OPS`); this copy exists so the macro can (a) reserve the
+/// names against user definitions and (b) reject bad arity at parse time.
+/// The two tables are pinned in sync by tests in this module.
+pub const BUILTIN_BINARY_OPS: &[(&str, &str)] = &[
+    // (rust_snake_case, wgsl operator)
+    ("cmp_eq", "=="),
+    ("cmp_ne", "!="),
+];
+
+/// Checks if a name refers to a binary-operator builtin (`cmp_eq`,
+/// `cmp_ne`). Returns the WGSL operator it renders as.
+pub fn is_operator_builtin(name: &str) -> Option<&'static str> {
+    BUILTIN_BINARY_OPS
+        .iter()
+        .find(|(rust, _)| *rust == name)
+        .map(|(_, op)| *op)
+}
+
 /// Looks up the WGSL name for a Rust function name.
 ///
 /// Returns `Some(wgsl_name)` if translation is needed, `None` if the name
@@ -180,15 +204,81 @@ pub fn lookup_wgsl_name(rust_name: &str) -> Option<&'static str> {
 ///
 /// Returns `Some((rust_name, wgsl_name))` if reserved, `None` otherwise.
 pub fn is_reserved_builtin(name: &str) -> Option<(&'static str, &'static str)> {
-    BUILTIN_CASE_NAME_MAP
+    if let Some(entry) = BUILTIN_CASE_NAME_MAP
         .iter()
         .find(|(rust, wgsl)| *rust == name || *wgsl == name)
+    {
+        return Some(*entry);
+    }
+    BUILTIN_BINARY_OPS
+        .iter()
+        .find(|(rust, _)| *rust == name)
         .copied()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgsl_rs_ir::{BinOp, render::builtin_lookup as ir_lookup};
+
+    /// The name-translation table is duplicated between this crate and
+    /// `wgsl-rs-ir` (which must stay standalone and cannot depend on a
+    /// proc-macro crate). This pins the two copies together: adding,
+    /// removing or editing an entry on one side without the other fails
+    /// here.
+    #[test]
+    fn builtin_name_map_matches_ir_table() {
+        assert_eq!(
+            BUILTIN_CASE_NAME_MAP.len(),
+            ir_lookup::TABLE.len(),
+            "BUILTIN_CASE_NAME_MAP and wgsl-rs-ir's TABLE drifted: lengths differ"
+        );
+        for (rust, wgsl) in BUILTIN_CASE_NAME_MAP {
+            assert!(
+                ir_lookup::TABLE.iter().any(|(r, w)| r == rust && w == wgsl),
+                "entry ({rust}, {wgsl}) is missing from wgsl-rs-ir's TABLE"
+            );
+        }
+        for (rust, wgsl) in ir_lookup::TABLE {
+            assert!(
+                BUILTIN_CASE_NAME_MAP
+                    .iter()
+                    .any(|(r, w)| r == rust && w == wgsl),
+                "entry ({rust}, {wgsl}) is missing from BUILTIN_CASE_NAME_MAP"
+            );
+        }
+    }
+
+    /// The binary-operator table is likewise duplicated. The macros copy
+    /// stores the WGSL operator as a string (for error messages), the ir
+    /// copy as a `BinOp` (for rendering); the mapping must agree.
+    #[test]
+    fn builtin_binary_ops_match_ir_table() {
+        assert_eq!(
+            BUILTIN_BINARY_OPS.len(),
+            ir_lookup::BINARY_OPS.len(),
+            "BUILTIN_BINARY_OPS and wgsl-rs-ir's BINARY_OPS drifted: lengths differ"
+        );
+        for (rust, op_str) in BUILTIN_BINARY_OPS {
+            let expected = match *op_str {
+                "==" => BinOp::Eq,
+                "!=" => BinOp::Ne,
+                other => panic!("unknown operator string {other} in BUILTIN_BINARY_OPS"),
+            };
+            assert_eq!(
+                ir_lookup::lookup_binary_op(rust),
+                Some(expected),
+                "BUILTIN_BINARY_OPS says {rust} renders as {op_str}, but wgsl-rs-ir's BINARY_OPS \
+                 disagrees"
+            );
+        }
+        for (rust, _) in ir_lookup::BINARY_OPS {
+            assert!(
+                BUILTIN_BINARY_OPS.iter().any(|(r, _)| r == rust),
+                "operator builtin {rust} is missing from BUILTIN_BINARY_OPS"
+            );
+        }
+    }
 
     #[test]
     fn lookup_existing_builtin() {
@@ -219,6 +309,15 @@ mod tests {
     fn is_reserved_matches_wgsl_name() {
         let result = is_reserved_builtin("countLeadingZeros");
         assert_eq!(result, Some(("count_leading_zeros", "countLeadingZeros")));
+    }
+
+    #[test]
+    fn operator_builtins_are_reserved() {
+        assert!(is_reserved_builtin("cmp_eq").is_some());
+        assert!(is_reserved_builtin("cmp_ne").is_some());
+        assert_eq!(is_operator_builtin("cmp_eq"), Some("=="));
+        assert_eq!(is_operator_builtin("cmp_ne"), Some("!="));
+        assert_eq!(is_operator_builtin("cmp_lt"), None);
     }
 
     #[test]

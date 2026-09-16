@@ -771,3 +771,86 @@ NUL-separated — and XOR-ing in the per-process counter (see
   versions — which rules out `DefaultHasher`.
 - Outside cargo the env vars are absent, and ids degrade to the old
   counter-only scheme, so non-cargo builds behave exactly as before.
+
+### 2026-09-15: Vector `==`/`!=` lowering and `cmp_eq`/`cmp_ne` masks (issue #164)
+
+**Problem:** Rust's `==` on vectors yields a `bool` (elementwise-all,
+per `PartialEq`), but WGSL's `==` yields a `vecN<bool>` mask. So
+`let x: bool = vec2f(0., 0.) == vec2f(0., 0.);` compiled in Rust but
+produced WGSL where a `vecN<bool>` fed a `bool` binding — naga rejected
+the shader. Worse, the mismatch was a silent CPU/GPU divergence: an
+unannotated `let m = a == b;` is `bool` on the CPU and `vecN<bool>` on
+the GPU. No CPU-valid Rust could ever obtain the componentwise mask from
+`==`, because `==` *is* `bool` in Rust.
+
+**Decision:** two composed lowerings.
+1. A post-monomorphization pass (`wgsl-rs-macros/src/vector_cmp.rs`)
+   walks the parse AST and rewrites vector `==` to `all(lhs == rhs)` and
+   `!=` to `!(all(lhs == rhs))` when both operands infer vector-typed.
+   Inference uses a module symbol table (fn returns, struct fields,
+   module consts) plus per-function locals walked in statement order
+   with proper scoping; constructors, casts, swizzles, indexing and
+   arithmetic propagate types. The inner operator of the `!=` wrap is
+   `==`: `all(a != b)` means "every component differs", which is not
+   `PartialEq::ne`. Types that cannot be inferred are left untouched
+   (fail-open) so CPU-only code keeps compiling and un-inferable
+   comparisons behave exactly as before.
+2. `cmp_eq(a, b)` / `cmp_ne(a, b)` free functions in std are the
+   componentwise escape hatch. They render as the raw WGSL operators
+   `(a == b)` / `(a != b)` via a new `BINARY_OPS` table in
+   `builtin_lookup`, extended to accept operator entries; the macros
+   crate mirrors the table (names reserved against user definitions,
+   arity/turbofish checked at parse time). The Rust return type is free
+   to vary per impl (an associated `Mask` type — generic over
+   `Vec2/3/4<T: PartialEq>`).
+
+**Justification:**
+- Post-mono placement means monomorphized generic functions have
+  concrete parameter types and get wrapped. Runtime-instantiated generic
+  entry-point templates still carry `TypeParam` types when their IR is
+  built, so vector `==` inside them is not wrapped — the same known
+  limitation as the #160 `!` -> `~` lowering.
+- `cmp_eq` lowers at render time, not in the pass: a `FnCall` node can
+  never be re-wrapped by (1), so the two lowerings cannot interfere.
+- Fail-open beats erroring: today a vector `==` compiles on the CPU via
+  Rust's `PartialEq`, and erroring on un-inferable comparisons would
+  break working CPU-only code.
+- Discovered along the way (not fixed here, separate issue): bool-vector
+  types in signatures render as the literal alias `vec2b`, which naga
+  rejects as an unknown identifier.
+- Tests: `wgsl-rs/tests/vector_equality.rs` (exact-substring pinning of
+  both lowerings, naga validation, CPU parity) and a roundtrip-test
+  category (`vector_equality`) driving `==`, `!=`, `cmp_eq`, `cmp_ne`
+  on GPU vs CPU.
+
+**Review follow-ups (PR #176):** the initial pass failed open on three
+operand families it could have inferred, recreating the #164 bug in
+narrower shapes: `cmp_eq`/`cmp_ne` results (masks now infer as
+`vecN<bool>` of the operands' shape), vector-preserving builtins
+(`normalize`, `abs`, `min`, ... now return their first argument's type),
+and impl-method calls (`Type::method()` now infers via a
+`Type_method`-keyed table built from concrete struct impls). Nested
+modules are no longer folded into the enclosing module's symbol table —
+their names used to shadow the enclosing module's functions during
+inference. The binary-operator rendering now spaces its operator
+(`(a == b)`) to match the ordinary Binary arm. One Copilot claim was
+verified false: clippy's `let_and_return` does not fire on the repro
+(annotated `let` bindings are exempt) and the CI clippy job uploads
+SARIF with `continue-on-error` rather than failing on warnings.
+
+**Second review round (PR #176):** inference now also covers `uniform!` /
+`storage!` / `workgroup!` linkage values (`get!(VAR)` resolves against the
+module's declarations), associated consts (`Vec2f::ZERO` via the type
+alias shape, user `impl` consts via the mangled `Type_member` table), and
+twelve more vector-preserving builtins (`step`, the hyperbolic inverses,
+the bit-manipulation set). One finding is a genuine, documented
+limitation rather than a fix: functions imported from other modules
+(`use provider::*`) are un-inferable because each `#[wgsl]` module
+expands in isolation and the macro never sees the provider's AST —
+comparisons of imported call results fail open, same as before this PR.
+CI fixes: docs job tripped on un-backticked `vec4<bool>` in doc comments
+(rustdoc reads it as an HTML tag); the format job's pinned nightly
+enforces `imports_granularity = "crate"`, which merges the new module's
+two `use crate::...` statements — stable rustfmt cannot enforce that
+option, so this repo's contributors need a nightly toolchain to check
+formatting locally.

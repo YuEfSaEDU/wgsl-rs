@@ -834,19 +834,44 @@ fn write_expr(w: &mut Writer, e: &Expr) {
             type_args,
             params,
         } => {
-            write_fn_path(w, path);
-            for ta in type_args {
-                w.write("_");
-                write_type(w, ta);
-            }
-            w.write("(");
-            for (i, p) in params.iter().enumerate() {
-                if i > 0 {
-                    w.write(", ");
+            // Binary-operator builtins (#164): `cmp_eq(a, b)` renders as
+            // `(a == b)` instead of a function call. Requires exactly two
+            // arguments and no turbofish; anything else falls through to
+            // the ordinary call rendering (the macro rejects such calls at
+            // parse time, so this is defense in depth).
+            let lowered_as_binop = if let FnPath::Ident(name) = path {
+                if type_args.is_empty() && params.len() == 2 {
+                    builtin_lookup::lookup_binary_op(name)
+                } else {
+                    None
                 }
-                write_expr(w, p);
+            } else {
+                None
+            };
+            if let Some(op) = lowered_as_binop {
+                // Spaced to match the Binary arm's rendering.
+                w.write("(");
+                write_expr(w, &params[0]);
+                w.write(" ");
+                w.write(binop_str(op));
+                w.write(" ");
+                write_expr(w, &params[1]);
+                w.write(")");
+            } else {
+                write_fn_path(w, path);
+                for ta in type_args {
+                    w.write("_");
+                    write_type(w, ta);
+                }
+                w.write("(");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        w.write(", ");
+                    }
+                    write_expr(w, p);
+                }
+                w.write(")");
             }
-            w.write(")");
         }
         Expr::Struct {
             name,

@@ -10,7 +10,6 @@ use syn::{
 
 use crate::parse::InterStageIo;
 
-
 mod builder;
 mod builtins;
 mod ir_convert;
@@ -25,6 +24,7 @@ mod storage;
 mod swizzle;
 mod texture;
 mod uniform;
+mod vector_cmp;
 mod workgroup;
 
 /// Visitor that strips `#[wgsl_allow(...)]` attributes from expressions.
@@ -733,6 +733,9 @@ fn go_wgsl(attr: TokenStream, mut input_mod: syn::ItemMod) -> Result<TokenStream
     // Resolve associated type projections (e.g. `Self::Array`, `T::Array`)
     // to concrete types using the impl-block index.
     monomorphize::resolve_assoc_types(&mut wgsl_module)?;
+    // Lower vector `==`/`!=` to `all(...)` wraps (#164). Runs after mono so
+    // monomorphized functions have concrete param types.
+    vector_cmp::rewrite(&mut wgsl_module.content);
     let imports = wgsl_module.imports(&crate_path);
 
     // Rewrite any `uniform!`/`storage!`/`workgroup!` declarations in the
