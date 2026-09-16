@@ -837,3 +837,20 @@ inference. The binary-operator rendering now spaces its operator
 verified false: clippy's `let_and_return` does not fire on the repro
 (annotated `let` bindings are exempt) and the CI clippy job uploads
 SARIF with `continue-on-error` rather than failing on warnings.
+
+**Second review round (PR #176):** inference now also covers `uniform!` /
+`storage!` / `workgroup!` linkage values (`get!(VAR)` resolves against the
+module's declarations), associated consts (`Vec2f::ZERO` via the type
+alias shape, user `impl` consts via the mangled `Type_member` table), and
+twelve more vector-preserving builtins (`step`, the hyperbolic inverses,
+the bit-manipulation set). One finding is a genuine, documented
+limitation rather than a fix: functions imported from other modules
+(`use provider::*`) are un-inferable because each `#[wgsl]` module
+expands in isolation and the macro never sees the provider's AST —
+comparisons of imported call results fail open, same as before this PR.
+CI fixes: docs job tripped on un-backticked `vec4<bool>` in doc comments
+(rustdoc reads it as an HTML tag); the format job's pinned nightly
+enforces `imports_granularity = "crate"`, which merges the new module's
+two `use crate::...` statements — stable rustfmt cannot enforce that
+option, so this repo's contributors need a nightly toolchain to check
+formatting locally.

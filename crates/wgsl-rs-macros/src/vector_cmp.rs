@@ -25,6 +25,12 @@
 //! case — are covered, because `monomorphize` appends their concrete
 //! copies to the module content before this pass runs.
 //!
+//! The same applies to functions imported from other modules
+//! (`use provider::*;`): each `#[wgsl]` module expands in isolation and
+//! the macro never sees the provider's parse AST, so imported call
+//! results are un-inferable and comparisons of them fail open. Fixing
+//! that requires cross-module type propagation in the build pipeline.
+//!
 //! The traversal reuses the [`crate::parse_visitor`] walker (the same
 //! machinery monomorphization uses): the pass is a
 //! [`parse_visitor::ParseVisitorMut`] that overrides the statement and
@@ -32,11 +38,13 @@
 //! are computed by re-reading the (already transformed) operands at each
 //! comparison node — a second shallow walk, compile-time only.
 
-use crate::parse::{
-    self, BinOp, Block, Expr, FnPath, ImplItem, Item, ItemConst, ItemFn, Lit, ReturnType,
-    ScalarType, Stmt, Type, UnOp,
+use crate::{
+    parse::{
+        self, BinOp, Block, Expr, FnPath, ImplItem, Item, ItemConst, ItemFn, Lit, ReturnType,
+        ScalarType, Stmt, Type, UnOp,
+    },
+    parse_visitor::{self, ParseVisitorMut},
 };
-use crate::parse_visitor::{self, ParseVisitorMut};
 use proc_macro2::{Ident, Span};
 use std::collections::HashMap;
 use syn::punctuated::Punctuated;
@@ -49,9 +57,11 @@ const TMP_IDENT: &str = "__wgsl_vector_cmp_tmp";
 struct Symbols {
     /// Free functions by name -> return type (`None` for `->`-less fns).
     /// Monomorphized instances are included: mono appends their concrete
-    /// copies to module content before this pass runs. Impl methods are
-    /// excluded — calls to them go through `FnPath::TypeMethod`, which
-    /// inference does not resolve.
+    /// copies to module content before this pass runs. Functions imported
+    /// from other modules are NOT here — each `#[wgsl]` module expands in
+    /// isolation, so imported returns are un-inferable and fail open. Impl
+    /// methods are indexed separately in `methods` under their mangled
+    /// `Type_method` names.
     fns: HashMap<String, Option<Type>>,
     /// Struct fields by struct name: `(field name, type)`.
     structs: HashMap<String, Vec<(String, Type)>>,
@@ -60,6 +70,9 @@ struct Symbols {
     /// Impl methods by rendered mangled name (`Type_method`) -> return
     /// type (`None` for `->`-less methods).
     methods: HashMap<String, Option<Type>>,
+    /// Linkage variables (`uniform!` / `storage!` / `workgroup!`) by
+    /// declared name -> declared WGSL type.
+    linkage: HashMap<String, Type>,
 }
 
 /// Scoped local-variable types, innermost scope last.
@@ -136,30 +149,65 @@ fn vector_ctor_alias(name: &str) -> Option<(u8, ScalarType)> {
     Some((elements, scalar))
 }
 
+/// Parse a WGSL vector *type* alias: `Vec2f` -> `(2, F32)`, etc. Used
+/// for associated consts of std vector types (`Vec2f::ZERO`), which are
+/// always of the vector's shape.
+fn vector_type_alias(name: &str) -> Option<(u8, ScalarType)> {
+    let rest = name.strip_prefix("Vec")?;
+    let mut chars = rest.chars();
+    let elements = match chars.next()? {
+        '2' => 2,
+        '3' => 3,
+        '4' => 4,
+        _ => return None,
+    };
+    let scalar = match chars.next()? {
+        'f' => ScalarType::F32,
+        'i' => ScalarType::I32,
+        'u' => ScalarType::U32,
+        'b' => ScalarType::Bool,
+        _ => return None,
+    };
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((elements, scalar))
+}
+
 /// WGSL builtin functions that preserve the shape of their first
 /// argument: scalar -> scalar, `vecN<T>` -> `vecN<T>`. Used for inference
 /// only — never rendered.
 const VECTOR_PRESERVING_BUILTINS: &[&str] = &[
     "abs",
     "acos",
+    "acosh",
     "asin",
+    "asinh",
     "atan",
     "atan2",
+    "atanh",
     "ceil",
     "clamp",
     "cos",
     "cosh",
+    "count_leading_zeros",
+    "count_one_bits",
+    "count_trailing_zeros",
     "cross",
     "degrees",
     "dpdx",
     "dpdy",
     "exp",
     "exp2",
+    "extract_bits",
     "face_forward",
+    "first_leading_bit",
+    "first_trailing_bit",
     "floor",
     "fma",
     "fract",
     "fwidth",
+    "insert_bits",
     "inverse_sqrt",
     "log",
     "log2",
@@ -171,6 +219,7 @@ const VECTOR_PRESERVING_BUILTINS: &[&str] = &[
     "radians",
     "reflect",
     "refract",
+    "reverse_bits",
     "round",
     "saturate",
     "select",
@@ -179,6 +228,7 @@ const VECTOR_PRESERVING_BUILTINS: &[&str] = &[
     "sinh",
     "smoothstep",
     "sqrt",
+    "step",
     "tan",
     "tanh",
     "trunc",
@@ -197,19 +247,28 @@ fn combine_arith(lt: Option<Type>, rt: Option<Type>) -> Option<Type> {
 }
 
 impl Symbols {
-    /// Collect module-wide symbol information (functions, structs, consts),
-    /// recursing into nested modules.
+    /// Collect module-wide symbol information (functions, structs, consts,
+    /// impl members, linkage declarations).
     fn build(content: &[Item]) -> Self {
         let mut fns = HashMap::new();
         let mut structs = HashMap::new();
         let mut consts = HashMap::new();
         let mut methods = HashMap::new();
-        Self::collect(content, &mut fns, &mut structs, &mut consts, &mut methods);
+        let mut linkage = HashMap::new();
+        Self::collect(
+            content,
+            &mut fns,
+            &mut structs,
+            &mut consts,
+            &mut methods,
+            &mut linkage,
+        );
         Self {
             fns,
             structs,
             consts,
             methods,
+            linkage,
         }
     }
 
@@ -219,6 +278,7 @@ impl Symbols {
         structs: &mut HashMap<String, Vec<(String, Type)>>,
         consts: &mut HashMap<String, Type>,
         methods: &mut HashMap<String, Option<Type>>,
+        linkage: &mut HashMap<String, Type>,
     ) {
         for item in content {
             match item {
@@ -242,6 +302,15 @@ impl Symbols {
                 Item::Const(c) => {
                     consts.insert(c.ident.to_string(), c.ty.clone());
                 }
+                Item::Uniform(u) => {
+                    linkage.insert(u.name.to_string(), u.ty.clone());
+                }
+                Item::Storage(st) => {
+                    linkage.insert(st.name.to_string(), st.ty.clone());
+                }
+                Item::Workgroup(wg) => {
+                    linkage.insert(wg.name.to_string(), wg.ty.clone());
+                }
                 // Nested modules are deliberately NOT collected into the
                 // enclosing table: their names must not shadow the
                 // enclosing module's (lexical scoping). `rewrite` builds
@@ -253,12 +322,21 @@ impl Symbols {
                     // array/trait impls fail open.
                     if let Type::Struct { ident, .. } = &i.self_ty {
                         for impl_item in &i.items {
-                            if let ImplItem::Fn(f) = impl_item {
-                                let ret = match &f.return_type {
-                                    ReturnType::Type { ty, .. } => Some((**ty).clone()),
-                                    ReturnType::Default => None,
-                                };
-                                methods.insert(format!("{}_{}", ident, f.ident), ret);
+                            match impl_item {
+                                ImplItem::Fn(f) => {
+                                    let ret = match &f.return_type {
+                                        ReturnType::Type { ty, .. } => Some((**ty).clone()),
+                                        ReturnType::Default => None,
+                                    };
+                                    methods.insert(format!("{}_{}", ident, f.ident), ret);
+                                }
+                                ImplItem::Const(c) => {
+                                    methods.insert(
+                                        format!("{}_{}", ident, c.ident),
+                                        Some(c.ty.clone()),
+                                    );
+                                }
+                                ImplItem::Type(_) => {}
                             }
                         }
                     }
@@ -430,8 +508,30 @@ impl Symbols {
                     .map(|(_, ty)| ty.clone()),
                 _ => None,
             },
-            // Array literals, type paths, zero-value arrays and linkage
-            // accesses: not inferable here.
+            Expr::LinkageAccess {
+                ident, type_arg, ..
+            } => {
+                // The one-argument form (`get!(VAR)`) resolves against the
+                // module's linkage declarations; the two-argument generic
+                // form keeps a Rust-side type expression and fails open.
+                if type_arg.is_some() {
+                    return None;
+                }
+                self.linkage.get(&ident.to_string()).cloned()
+            }
+            Expr::TypePath { ty, member, .. } => {
+                // `Type::MEMBER`: user impls are indexed under the mangled
+                // `Type_member` name; std vector associated consts
+                // (`Vec2f::ZERO`) are always of the vector's shape, so
+                // fall back to the type alias.
+                let key = format!("{ty}_{member}");
+                if let Some(t) = self.methods.get(&key) {
+                    return t.clone();
+                }
+                vector_type_alias(&ty.to_string())
+                    .map(|(elements, scalar)| vector_ty(elements, scalar, e.span()))
+            }
+            // Array literals and zero-value arrays: not inferable here.
             _ => None,
         }
     }

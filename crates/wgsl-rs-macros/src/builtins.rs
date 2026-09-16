@@ -219,8 +219,7 @@ pub fn is_reserved_builtin(name: &str) -> Option<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wgsl_rs_ir::BinOp;
-    use wgsl_rs_ir::render::builtin_lookup as ir_lookup;
+    use wgsl_rs_ir::{BinOp, render::builtin_lookup as ir_lookup};
 
     /// The name-translation table is duplicated between this crate and
     /// `wgsl-rs-ir` (which must stay standalone and cannot depend on a

@@ -88,7 +88,7 @@ pub mod vec_ne {
 }
 
 /// cmp_eq_mask: `any(cmp_eq(a, b))` — `cmp_eq` renders as the raw `==`
-/// operator, yielding a vec4<bool> mask reduced by `any`.
+/// operator, yielding a `vec4<bool>` mask reduced by `any`.
 #[wgsl]
 pub mod cmp_eq_mask {
     use wgsl_rs::std::*;
@@ -124,7 +124,7 @@ pub mod cmp_eq_mask {
 }
 
 /// cmp_ne_mask: `any(cmp_ne(a, b))` — `cmp_ne` renders as the raw `!=`
-/// operator, yielding a vec4<bool> mask reduced by `any`.
+/// operator, yielding a `vec4<bool>` mask reduced by `any`.
 #[wgsl]
 pub mod cmp_ne_mask {
     use wgsl_rs::std::*;

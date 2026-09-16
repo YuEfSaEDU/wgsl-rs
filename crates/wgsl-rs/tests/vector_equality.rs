@@ -145,6 +145,38 @@ mod infer_gaps {
         Helpers::make(a) == Helpers::make(b)
     }
 
+    // Linkage values are inferable from the module's `storage!`
+    // declarations (a plain comment: macro invocations cannot carry doc
+    // comments without an unused-doc-comment warning).
+    storage!(group(0), binding(0), INPUT: [Vec2f; 2]);
+
+    pub fn linkage_eq() -> bool {
+        let input = get!(INPUT);
+        input[0] == input[1]
+    }
+
+    /// Associated consts of std vector types are inferable from the type
+    /// alias shape.
+    pub fn zero_one_eq() -> bool {
+        Vec2f::ZERO == Vec2f::ONE
+    }
+
+    /// Associated consts of user impls are inferable from the impl's
+    /// declared type.
+    impl Helpers {
+        pub const ORIGIN: Vec2f = vec2f(0.0, 0.0);
+    }
+
+    pub fn origin_eq(a: Vec2f) -> bool {
+        Helpers::ORIGIN == a
+    }
+
+    /// The extended vector-preserving builtin list, spot-checked with
+    /// `step`.
+    pub fn step_eq(a: Vec3f, b: Vec3f, c: Vec3f, d: Vec3f) -> bool {
+        step(a, b) == step(c, d)
+    }
+
     /// A nested module's `make` must not shadow the enclosing module's
     /// `make` during inference (nested mods emit no WGSL, but their
     /// symbols used to leak into the enclosing module's table).
@@ -271,6 +303,22 @@ fn infer_gaps_lower_to_all() {
             "return all(make() == make());",
             "nested module does not shadow outer symbols",
         ),
+        (
+            "return all(input[0] == input[1]);",
+            "storage linkage values infer",
+        ),
+        (
+            "return all(vec2f_ZERO == vec2f_ONE);",
+            "std vector associated consts infer",
+        ),
+        (
+            "return all(Helpers_ORIGIN == a);",
+            "user impl associated consts infer",
+        ),
+        (
+            "return all(step(a, b) == step(c, d));",
+            "step is a vector-preserving builtin",
+        ),
     ] {
         assert!(
             src.contains(needle),
@@ -340,5 +388,18 @@ fn cpu_vector_eq_values() {
     assert!(g::method_call_eq(v, v));
     assert!(!g::method_call_eq(v, w));
     assert!(g::shadowed_eq());
+    g::INPUT.set([vec2f(1.0, 2.0), vec2f(1.0, 2.0)]);
+    assert!(g::linkage_eq());
+    g::INPUT.set([vec2f(1.0, 2.0), vec2f(3.0, 4.0)]);
+    assert!(!g::linkage_eq());
+    assert!(!g::zero_one_eq());
+    assert!(g::origin_eq(vec2f(0.0, 0.0)));
+    assert!(!g::origin_eq(vec2f(1.0, 1.0)));
+    assert!(g::step_eq(
+        vec3f(0.0, 0.0, 0.0),
+        vec3f(1.0, 1.0, 1.0),
+        vec3f(0.0, 0.0, 0.0),
+        vec3f(1.0, 1.0, 1.0)
+    ));
     assert!(!m::mask_any_ne(vec3f(1.0, 2.0, 3.0), vec3f(1.0, 2.0, 3.0)));
 }
