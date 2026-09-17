@@ -8068,7 +8068,14 @@ mod test {
         // Identifiers that merely contain `Vec`/`Mat` (e.g. `MyVec3f`) used
         // in type position must resolve to the user type, not a builtin
         // alias.
-        for name in ["MyVec3f", "MyVec3", "MyMat2x2f", "MyMat4f", "AVec3f", "Vector3f"] {
+        for name in [
+            "MyVec3f",
+            "MyVec3",
+            "MyMat2x2f",
+            "MyMat4f",
+            "AVec3f",
+            "Vector3f",
+        ] {
             let ty: syn::Type = syn::parse_str(name).unwrap();
             let ty = Type::try_from(&ty).unwrap();
             let Type::Struct { ident, .. } = &ty else {
